@@ -16,7 +16,9 @@ import { KanbanColumn } from "@/components/KanbanColumn";
 import { KanbanCardPreview } from "@/components/KanbanCardPreview";
 import { createId, initialData, moveCard, type BoardData } from "@/lib/kanban";
 
-export const KanbanBoard = ({ onLogout }: { onLogout: () => void }) => {
+type User = { name?: string; email?: string; picture?: string | null };
+
+export const KanbanBoard = ({ onLogout, user }: { onLogout: () => void; user?: User }) => {
   const [board, setBoard] = useState<BoardData>(() => initialData);
   const [activeCardId, setActiveCardId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -221,6 +223,16 @@ export const KanbanBoard = ({ onLogout }: { onLogout: () => void }) => {
                   </p>
                 </div>
                 <div className="flex items-center gap-3">
+                  {user?.picture ? (
+                    <img
+                      src={user.picture}
+                      alt={user.name ?? "User"}
+                      className="h-9 w-9 rounded-full border border-slate-200 object-cover"
+                    />
+                  ) : null}
+                  {user?.name ? (
+                    <span className="text-sm font-medium text-slate-700">{user.name}</span>
+                  ) : null}
                   <button
                     type="button"
                     onClick={onLogout}
