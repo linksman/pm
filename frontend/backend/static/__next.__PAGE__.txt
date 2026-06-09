@@ -1,6 +1,0 @@
-1:"$Sreact.fragment"
-2:I[97270,["/_next/static/chunks/a0a0b736e12f0a23.js"],"KanbanBoard"]
-3:I[72634,["/_next/static/chunks/6b03335f5e278573.js"],"OutletBoundary"]
-4:"$Sreact.suspense"
-0:{"buildId":"cshc170X9mls3rs3OAIeq","rsc":["$","$1","c",{"children":[["$","$L2",null,{}],[["$","script","script-0",{"src":"/_next/static/chunks/a0a0b736e12f0a23.js","async":true}]],["$","$L3",null,{"children":["$","$4",null,{"name":"Next.MetadataOutlet","children":"$@5"}]}]]}],"loading":null,"isPartial":false}
-5:null
