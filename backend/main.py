@@ -1,13 +1,16 @@
 import json
 import os
+import secrets
 import sqlite3
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Literal
+from urllib.parse import urlencode
 
+import httpx
 from fastapi import Body, Cookie, FastAPI, HTTPException, Response, status
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from openai import OpenAI
 from pydantic import BaseModel
@@ -22,10 +25,11 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="PM MVP Backend", lifespan=lifespan)
 
 AUTH_COOKIE_NAME = "pm_mvp_auth"
-AUTH_COOKIE_VALUE = "true"
+USER_INFO_COOKIE_NAME = "pm_user_info"
+OAUTH_STATE_COOKIE_NAME = "oauth_state"
+DEMO_USER_ID = "user"
 VALID_USERNAME = "user"
 VALID_PASSWORD = "password"
-USER_ID = "user"
 
 DB_DIR = Path(__file__).parent / "data"
 DB_PATH = DB_DIR / "kanban.db"
@@ -33,7 +37,10 @@ OPENROUTER_API_KEY_NAME = "OPENROUTER_API_KEY"
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 OPENROUTER_MODEL = "openai/gpt-oss-120b"
 
-# Serve static files (simple hello/demo) if present
+GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/auth"
+GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
+GOOGLE_USERINFO_URL = "https://www.googleapis.com/oauth2/v2/userinfo"
+
 static_dir = os.path.join(os.path.dirname(__file__), "static")
 
 
@@ -140,6 +147,23 @@ def load_dotenv_from_root() -> None:
                 os.environ[key] = value
 
 
+def get_google_credentials() -> tuple[str, str]:
+    load_dotenv_from_root()
+    client_id = os.getenv("GOOGLE_CLIENT_ID")
+    client_secret = os.getenv("GOOGLE_CLIENT_SECRET")
+    if not client_id or not client_secret:
+        raise HTTPException(
+            status_code=status.HTTP_501_NOT_IMPLEMENTED,
+            detail="Google OAuth is not configured. Set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET in .env.",
+        )
+    return client_id, client_secret
+
+
+def get_google_redirect_uri() -> str:
+    load_dotenv_from_root()
+    return os.getenv("GOOGLE_REDIRECT_URI", "http://localhost:8000/api/auth/google/callback")
+
+
 def get_openrouter_api_key() -> str:
     load_dotenv_from_root()
     api_key = os.getenv(OPENROUTER_API_KEY_NAME)
@@ -151,7 +175,7 @@ def get_openrouter_api_key() -> str:
     return api_key
 
 
-def get_board_state(user_id: str = USER_ID) -> BoardData:
+def get_board_state(user_id: str = DEMO_USER_ID) -> BoardData:
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.execute(
         "SELECT state FROM board_state WHERE user_id = ?",
@@ -166,7 +190,7 @@ def get_board_state(user_id: str = USER_ID) -> BoardData:
     return INITIAL_BOARD
 
 
-def save_board_state(board: BoardData, user_id: str = USER_ID) -> None:
+def save_board_state(board: BoardData, user_id: str = DEMO_USER_ID) -> None:
     conn = sqlite3.connect(DB_PATH)
     conn.execute(
         """
@@ -214,6 +238,33 @@ def call_openrouter(messages: List[dict]) -> dict:
         )
 
 
+def set_auth_cookies(response: Response, user_id: str, name: str, email: str, picture: str | None) -> None:
+    response.set_cookie(
+        AUTH_COOKIE_NAME,
+        user_id,
+        httponly=True,
+        samesite="lax",
+        path="/",
+    )
+    user_info = json.dumps({"name": name, "email": email, "picture": picture})
+    response.set_cookie(
+        USER_INFO_COOKIE_NAME,
+        user_info,
+        httponly=True,
+        samesite="lax",
+        path="/",
+    )
+
+
+def validate_auth(auth_cookie: str | None = Cookie(None, alias=AUTH_COOKIE_NAME)) -> str:
+    if not auth_cookie:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authentication required.",
+        )
+    return auth_cookie
+
+
 @app.get("/api/health")
 def health():
     return {"status": "ok"}
@@ -232,13 +283,7 @@ def login(
     username = credentials.get("username")
     password = credentials.get("password")
     if username == VALID_USERNAME and password == VALID_PASSWORD:
-        response.set_cookie(
-            AUTH_COOKIE_NAME,
-            AUTH_COOKIE_VALUE,
-            httponly=True,
-            samesite="lax",
-            path="/",
-        )
+        set_auth_cookies(response, DEMO_USER_ID, "Demo User", VALID_USERNAME, None)
         return {"authenticated": True}
 
     raise HTTPException(
@@ -250,26 +295,109 @@ def login(
 @app.post("/api/auth/logout")
 def logout(response: Response):
     response.delete_cookie(AUTH_COOKIE_NAME, path="/")
+    response.delete_cookie(USER_INFO_COOKIE_NAME, path="/")
     return {"authenticated": False}
 
 
-def validate_auth(auth_cookie: str | None = Cookie(None, alias=AUTH_COOKIE_NAME)):
-    if auth_cookie != AUTH_COOKIE_VALUE:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Authentication required.",
-        )
-
-
 @app.get("/api/auth/me")
-def me(auth_cookie: str | None = Cookie(None, alias=AUTH_COOKIE_NAME)):
-    return {"authenticated": auth_cookie == AUTH_COOKIE_VALUE}
+def me(
+    auth_cookie: str | None = Cookie(None, alias=AUTH_COOKIE_NAME),
+    user_info_cookie: str | None = Cookie(None, alias=USER_INFO_COOKIE_NAME),
+):
+    if not auth_cookie:
+        return {"authenticated": False}
+    user_info: dict = {}
+    if user_info_cookie:
+        try:
+            user_info = json.loads(user_info_cookie)
+        except (json.JSONDecodeError, ValueError):
+            pass
+    return {"authenticated": True, **user_info}
+
+
+@app.get("/api/auth/google")
+def google_login():
+    client_id, _ = get_google_credentials()
+    state = secrets.token_urlsafe(32)
+    params = {
+        "client_id": client_id,
+        "redirect_uri": get_google_redirect_uri(),
+        "scope": "openid email profile",
+        "response_type": "code",
+        "state": state,
+        "access_type": "online",
+    }
+    redirect = RedirectResponse(f"{GOOGLE_AUTH_URL}?{urlencode(params)}")
+    redirect.set_cookie(OAUTH_STATE_COOKIE_NAME, state, httponly=True, max_age=600, samesite="lax", path="/")
+    return redirect
+
+
+@app.get("/api/auth/google/callback")
+def google_callback(
+    code: str | None = None,
+    state: str | None = None,
+    error: str | None = None,
+    oauth_state: str | None = Cookie(None, alias=OAUTH_STATE_COOKIE_NAME),
+):
+    def _redirect_error(reason: str) -> RedirectResponse:
+        r = RedirectResponse(f"/?auth_error={reason}")
+        r.delete_cookie(OAUTH_STATE_COOKIE_NAME, path="/")
+        return r
+
+    if error:
+        return _redirect_error(error)
+
+    if not code or not state or state != oauth_state:
+        return _redirect_error("invalid_state")
+
+    client_id, client_secret = get_google_credentials()
+    redirect_uri = get_google_redirect_uri()
+
+    token_response = httpx.post(
+        GOOGLE_TOKEN_URL,
+        data={
+            "code": code,
+            "client_id": client_id,
+            "client_secret": client_secret,
+            "redirect_uri": redirect_uri,
+            "grant_type": "authorization_code",
+        },
+    )
+    if token_response.status_code != 200:
+        return _redirect_error("token_exchange_failed")
+
+    access_token = token_response.json().get("access_token")
+    if not access_token:
+        return _redirect_error("no_access_token")
+
+    userinfo_response = httpx.get(
+        GOOGLE_USERINFO_URL,
+        headers={"Authorization": f"Bearer {access_token}"},
+    )
+    if userinfo_response.status_code != 200:
+        return _redirect_error("userinfo_failed")
+
+    user_info = userinfo_response.json()
+    user_id = user_info.get("id") or user_info.get("sub")
+    if not user_id:
+        return _redirect_error("no_user_id")
+
+    redirect = RedirectResponse("/")
+    redirect.delete_cookie(OAUTH_STATE_COOKIE_NAME, path="/")
+    set_auth_cookies(
+        redirect,
+        user_id=str(user_id),
+        name=user_info.get("name", ""),
+        email=user_info.get("email", ""),
+        picture=user_info.get("picture"),
+    )
+    return redirect
 
 
 @app.get("/api/board")
 def get_board(auth_cookie: str | None = Cookie(None, alias=AUTH_COOKIE_NAME)):
-    validate_auth(auth_cookie)
-    return get_board_state()
+    user_id = validate_auth(auth_cookie)
+    return get_board_state(user_id)
 
 
 @app.put("/api/board")
@@ -277,8 +405,8 @@ def update_board(
     board: BoardData,
     auth_cookie: str | None = Cookie(None, alias=AUTH_COOKIE_NAME),
 ):
-    validate_auth(auth_cookie)
-    save_board_state(board)
+    user_id = validate_auth(auth_cookie)
+    save_board_state(board, user_id)
     return board
 
 
@@ -287,8 +415,8 @@ def ai_chat(
     request: AIChatRequest,
     auth_cookie: str | None = Cookie(None, alias=AUTH_COOKIE_NAME),
 ):
-    validate_auth(auth_cookie)
-    board = get_board_state()
+    user_id = validate_auth(auth_cookie)
+    board = get_board_state(user_id)
 
     system_prompt = (
         "You are a project management assistant. "
@@ -345,7 +473,7 @@ def ai_chat(
 
     if board_update is not None:
         board = BoardData.model_validate(board_update)
-        save_board_state(board)
+        save_board_state(board, user_id)
         return {"reply": reply, "board": board}
 
     return {"reply": reply}
@@ -380,7 +508,6 @@ def ai_test():
 
 @app.get("/api/hello", response_class=HTMLResponse)
 def hello():
-    # Serve index.html content for API check or fallback message
     index_path = os.path.join(static_dir, "index.html")
     if os.path.isfile(index_path):
         with open(index_path, "r") as f:
@@ -390,7 +517,6 @@ def hello():
 
 @app.get("/", response_class=HTMLResponse)
 def root():
-    # Serve the static index at root if present
     index_path = os.path.join(static_dir, "index.html")
     if os.path.isfile(index_path):
         with open(index_path, "r") as f:
@@ -398,6 +524,5 @@ def root():
     return HTMLResponse("<h1>PM MVP Backend (no static files)</h1>")
 
 
-# Mount static files at root (after API routes) so asset paths like /_next/* resolve correctly
 if os.path.isdir(static_dir):
     app.mount("/", StaticFiles(directory=static_dir, html=True), name="static")
