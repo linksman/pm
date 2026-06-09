@@ -4,6 +4,24 @@ Part 1: Plan
 
 Enrich this document to plan out each of these parts in detail, with substeps listed out as a checklist to be checked off by the agent, and with tests and success critieria for each. Also create an AGENTS.md file inside the frontend directory that describes the existing code there. Ensure the user checks and approves the plan.
 
+Decisions (recorded):
+
+- **OpenRouter model:** `openai/gpt-oss-120b` via OpenRouter (use this model for AI calls).
+- **Python package manager in Docker:** `uv` (use `uv` as specified, not `pip`).
+- **SQLite database filename:** `kanban.db` (file-based DB at project root or `backend/data/kanban.db`).
+- **OpenRouter API key:** `OPENROUTER_API_KEY` is set in the repository `.env` (no further action needed to obtain the key).
+- **Backend test framework:** `pytest` (use `pytest` for backend unit and integration tests).
+- **Docker layout:** single Docker container running the FastAPI backend which will serve the statically built Next.js frontend at `/` (FastAPI serves the built files).
+
+Enrichment notes:
+
+- This `docs/PLAN.md` will be updated incrementally as implementation decisions are made and as features are completed. Each Part below should include explicit success criteria and tests before work begins.
+- The frontend already contains a demo Kanban; the plan assumes we will statically build it (`next build` + `next export` or `next build` and copy `.next` static files) and serve via FastAPI.
+- Database path recommendation: create a `backend/data/` directory and place `kanban.db` there; the backend should create the DB file if it doesn't exist.
+- CI / local run recommendation: provide simple `scripts/start.sh` and `scripts/stop.sh` (or platform-specific variants) that build the frontend, start the backend in Docker, and run tests.
+
+Action: the agent will update this file with more detailed substeps and test criteria as each Part is started.
+
 Part 2: Scaffolding
 
 Set up the Docker infrastructure, the backend in backend/ with FastAPI, and write the start and stop scripts in the scripts/ directory. This should serve example static HTML to confirm that a 'hello world' example works running locally and also make an API call.
