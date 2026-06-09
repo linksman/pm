@@ -7,7 +7,7 @@ RUN apt-get update && apt-get install -y build-essential && rm -rf /var/lib/apt/
 
 # Install `uv` package manager and runtime dependencies
 # Note: `uv` is installed so the container can use it as requested.
-RUN pip install --no-cache-dir uv fastapi uvicorn
+RUN pip install --no-cache-dir uv fastapi uvicorn openai
 
 # Copy backend app
 COPY backend /app/backend
