@@ -1,13 +1,13 @@
-# Kanban Studio
+# קאנבן סטודיו
 
-## Run
+## הרצה
 
 ```bash
 npm install
 npm run dev
 ```
 
-## Tests
+## בדיקות
 
 ```bash
 npm run test:unit
