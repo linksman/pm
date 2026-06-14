@@ -1,6 +1,6 @@
 # Kanban Studio
 
-## Run
+## Ausführen
 
 ```bash
 npm install
